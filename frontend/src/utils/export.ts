@@ -110,7 +110,13 @@ export async function importBackup(
       await db.elements.bulkPut(payload.elements)
       await db.layers.bulkPut(payload.layers)
       await db.decays.bulkPut(payload.decays)
-      await db.repairSteps.bulkPut(payload.repairSteps)
+      // 旧备份的工序可能缺少 completedAt，导入时按状态补齐
+      await db.repairSteps.bulkPut(
+        payload.repairSteps.map((step) => ({
+          ...step,
+          completedAt: step.state === '已完成' ? step.completedAt ?? step.updatedAt ?? Date.now() : null
+        }))
+      )
     }
   )
   return {
@@ -259,6 +265,7 @@ export async function seedDemoData(): Promise<void> {
           material: '软毛刷 + 去离子水',
           operator: '李文博',
           state: '已完成',
+          completedAt: now,
           createdAt: now,
           updatedAt: now
         },
@@ -270,6 +277,7 @@ export async function seedDemoData(): Promise<void> {
           material: '鱼鳔胶（2% 明矾水调和）',
           operator: '李文博',
           state: '进行中',
+          completedAt: null,
           createdAt: now,
           updatedAt: now
         }

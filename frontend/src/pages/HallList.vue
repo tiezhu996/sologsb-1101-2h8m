@@ -68,11 +68,15 @@ const cards = computed(() =>
       return decay?.hallId === hall.id
     })
     const doneSteps = steps.filter((step) => step.state === '已完成').length
+    const repairing = decayStore.rows.filter(
+      (row) => row.hallId === hall.id && repairStore.phaseOf(row.decay.id) === '修复中'
+    ).length
     return {
       hall,
       stat,
       areaText: formatArea(aggregate?.areaCm2 ?? 0),
       unrepaired: stat?.unrepairedCount ?? 0,
+      repairing,
       decayCount: stat?.decayCount ?? 0,
       elementCount: stat?.elementCount ?? 0,
       layerCount: stat?.layerCount ?? 0,
@@ -245,6 +249,10 @@ async function seed(): Promise<void> {
           <div>
             <dt>风险加权分</dt>
             <dd class="mono">{{ card.risk }}</dd>
+          </div>
+          <div>
+            <dt>修复中</dt>
+            <dd class="mono">{{ card.repairing }} 条</dd>
           </div>
           <div>
             <dt>工序完成</dt>

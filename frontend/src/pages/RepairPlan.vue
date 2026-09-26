@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Delete, Edit, MagicStick, Plus, Sort } from '@element-plus/icons-vue'
+import { Delete, Edit, Lock, MagicStick, Plus, Sort } from '@element-plus/icons-vue'
 import EmptyPanel from '@/components/common/EmptyPanel.vue'
 import SeverityTag from '@/components/common/SeverityTag.vue'
 import StatBadge from '@/components/common/StatBadge.vue'
@@ -53,13 +53,11 @@ const stepForm = reactive<{
   name: RepairStepName
   material: string
   operator: string
-  state: RepairState
 }>({
   decayId: '',
   name: '除尘',
   material: '',
-  operator: '',
-  state: '未开始'
+  operator: ''
 })
 
 const scratchDialogVisible = ref(false)
@@ -128,13 +126,11 @@ function openStepDialog(decayId: string, step?: RepairStep): void {
     stepForm.name = step.name
     stepForm.material = step.material
     stepForm.operator = step.operator
-    stepForm.state = step.state
   } else {
     editingStepId.value = null
     stepForm.name = '除尘'
     stepForm.material = ''
     stepForm.operator = ''
-    stepForm.state = '未开始'
   }
   stepDialogVisible.value = true
 }
@@ -145,8 +141,7 @@ async function submitStep(): Promise<void> {
     await repairStore.updateStep(editingStepId.value, {
       name: stepForm.name,
       material: stepForm.material.trim(),
-      operator: stepForm.operator.trim(),
-      state: stepForm.state
+      operator: stepForm.operator.trim()
     })
     ElMessage.success('工序已更新')
   } else {
@@ -154,8 +149,7 @@ async function submitStep(): Promise<void> {
       decayId: stepForm.decayId,
       name: stepForm.name,
       material: stepForm.material.trim(),
-      operator: stepForm.operator.trim(),
-      state: stepForm.state
+      operator: stepForm.operator.trim()
     })
     ElMessage.success('已追加修复工序')
   }
@@ -183,13 +177,37 @@ async function removeGroup(group: RepairGroup): Promise<void> {
 }
 
 async function changeState(step: RepairStep, state: RepairState): Promise<void> {
-  await repairStore.setStepState(step.id, state)
   const group = repairStore.groupOf(step.decayId)
-  if (state === '已完成' && group && group.doneCount === group.totalCount) {
-    ElMessage.success('该病害全部工序完成，病害已回写为「已修复」')
-  } else {
-    ElMessage.success(`工序状态已改为「${state}」`)
+  if (step.state === '已完成' && state !== '已完成' && group) {
+    const laterActive = group.steps.filter((item) => item.seq > step.seq && item.state !== '未开始').length
+    if (laterActive > 0) {
+      const confirmed = await ElMessageBox.confirm(
+        `退回「${step.name}」后，其后 ${laterActive} 道已推进的工序将一并重置为未开始，该病害退回修复中。是否继续？`,
+        '退回确认',
+        { type: 'warning' }
+      ).catch(() => false)
+      if (!confirmed) return
+    }
   }
+  try {
+    const cascaded = await repairStore.setStepState(step.id, state)
+    const after = repairStore.groupOf(step.decayId)
+    if (state === '已完成' && after && after.doneCount === after.totalCount) {
+      ElMessage.success('最后一道工序完成，该病害已回写为「已修复」')
+    } else if (cascaded > 0) {
+      ElMessage.warning(`已退回为「${state}」，其后 ${cascaded} 道工序一并重置，病害退回修复中`)
+    } else {
+      ElMessage.success(`工序状态已改为「${state}」`)
+    }
+  } catch (err) {
+    ElMessage.warning(err instanceof Error ? err.message : '该工序暂时点不动')
+  }
+}
+
+function formatTime(ts: number): string {
+  const date = new Date(ts)
+  const pad = (value: number): string => String(value).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
 }
 
 function onDragStart(step: RepairStep): void {
@@ -362,6 +380,9 @@ const stateOptions = REPAIR_STATES
           </div>
           <div class="timeline__head-right">
             <SeverityTag v-if="group.decay" :severity="group.decay.severity" size="small" plain />
+            <el-tag :type="group.percent === 100 ? 'success' : 'warning'" effect="plain" round>
+              {{ repairStore.phaseOf(group.decayId) }}
+            </el-tag>
             <el-tag :type="group.percent === 100 ? 'success' : 'info'" effect="plain" round>
               {{ group.doneCount }}/{{ group.totalCount }}（{{ group.percent }}%）
             </el-tag>
@@ -421,16 +442,26 @@ const stateOptions = REPAIR_STATES
                   @keyup.enter="commitDraft(step, 'operator')"
                 />
               </div>
+              <div v-if="step.completedAt" class="step-card__time muted">完成于 {{ formatTime(step.completedAt) }}</div>
             </div>
             <div class="step-card__actions">
-              <el-select
+              <el-tooltip
+                v-if="repairStore.isLocked(step)"
+                content="前一道工序未完成，按现场规矩这道点不动"
+                placement="top"
+              >
+                <el-icon class="step-card__lock"><Lock /></el-icon>
+              </el-tooltip>
+              <el-radio-group
                 :model-value="step.state"
                 size="small"
                 class="step-card__state"
-                @update:model-value="(value: RepairState) => changeState(step, value)"
+                @update:model-value="(value: string | number | boolean | undefined) => changeState(step, value as RepairState)"
               >
-                <el-option v-for="item in stateOptions" :key="item" :label="item" :value="item" />
-              </el-select>
+                <el-radio-button value="未开始">未开始</el-radio-button>
+                <el-radio-button value="进行中" :disabled="repairStore.isLocked(step)">进行中</el-radio-button>
+                <el-radio-button value="已完成" :disabled="repairStore.isLocked(step)">已完成</el-radio-button>
+              </el-radio-group>
               <el-button size="small" text :icon="Edit" @click="openStepDialog(group.decayId, step)">编辑</el-button>
               <el-button size="small" text type="danger" @click="removeStep(step)">删除</el-button>
             </div>
@@ -470,11 +501,6 @@ const stateOptions = REPAIR_STATES
         </el-form-item>
         <el-form-item label="责任人">
           <el-input v-model="stepForm.operator" placeholder="如：李文博" maxlength="20" />
-        </el-form-item>
-        <el-form-item label="工序状态">
-          <el-radio-group v-model="stepForm.state">
-            <el-radio v-for="item in stateOptions" :key="item" :value="item">{{ item }}</el-radio>
-          </el-radio-group>
         </el-form-item>
       </el-form>
       <template #footer>
@@ -667,7 +693,16 @@ const stateOptions = REPAIR_STATES
 }
 
 .step-card__state {
-  width: 110px;
+  flex-shrink: 0;
+}
+
+.step-card__lock {
+  color: #b09a76;
+}
+
+.step-card__time {
+  margin-top: 6px;
+  font-size: 12px;
 }
 
 .timeline__add {

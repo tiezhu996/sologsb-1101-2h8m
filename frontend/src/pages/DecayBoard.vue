@@ -13,6 +13,7 @@ import { useDecayStore } from '@/stores/decayStore'
 import { useRepairStore } from '@/stores/repairStore'
 import { DECAY_TYPES, type Decay, type DecayType, type Severity } from '@/types/decay'
 import { SEVERITIES } from '@/types/decay'
+import { REPAIR_PHASES, type RepairPhase } from '@/types/repair'
 import { formatArea, SEVERITY_COLOR } from '@/utils/severity'
 
 const router = useRouter()
@@ -38,6 +39,7 @@ const {
 
 const batchSeverity = ref<Severity>('中度')
 const batchType = ref<DecayType>('起甲')
+const phaseFilter = ref<RepairPhase | ''>('')
 const editDialogVisible = ref(false)
 const editingDecay = ref<Decay | null>(null)
 const editForm = ref<{
@@ -65,13 +67,22 @@ const filterSelects = computed(() => [
 ])
 
 const selectedRows = computed(() =>
-  sortedRows.value.filter((row) => decayStore.selectedIds.has(row.decay.id))
+  displayRows.value.filter((row) => decayStore.selectedIds.has(row.decay.id))
+)
+
+/** 修复状态筛选：待安排 / 修复中 / 已修复，由工序推进情况派生 */
+const displayRows = computed(() =>
+  sortedRows.value.filter((row) => !phaseFilter.value || repairStore.phaseOf(row.decay.id) === phaseFilter.value)
+)
+
+const repairingCount = computed(
+  () => decayStore.decays.filter((decay) => repairStore.phaseOf(decay.id) === '修复中').length
 )
 
 watch(
-  () => sortedRows.value.map((row) => row.decay.id).join(','),
+  () => displayRows.value.map((row) => row.decay.id).join(','),
   () => {
-    const visible = new Set(sortedRows.value.map((row) => row.decay.id))
+    const visible = new Set(displayRows.value.map((row) => row.decay.id))
     Array.from(decayStore.selectedIds).forEach((id) => {
       if (!visible.has(id)) decayStore.selectedIds.delete(id)
     })
@@ -93,6 +104,11 @@ function handleFilterChange(value: FilterModel): void {
 
 function handleSwitch(value: boolean): void {
   patch({ onlyUnrepaired: value })
+}
+
+function handleReset(): void {
+  phaseFilter.value = ''
+  reset()
 }
 
 function handleSelectionChange(rows: Array<{ decay: Decay }>): void {
@@ -124,6 +140,12 @@ function hallLabel(layerId: string): string {
 function repairProgress(decayId: string): { done: number; total: number } {
   const steps = repairStore.steps.filter((step) => step.decayId === decayId)
   return { done: steps.filter((step) => step.state === '已完成').length, total: steps.length }
+}
+
+function phaseTagType(phase: RepairPhase): 'info' | 'warning' | 'success' {
+  if (phase === '已修复') return 'success'
+  if (phase === '修复中') return 'warning'
+  return 'info'
 }
 
 async function applyBatchSeverity(): Promise<void> {
@@ -180,23 +202,6 @@ async function removeRow(row: { decay: Decay }): Promise<void> {
   ElMessage.success('病害记录已删除')
 }
 
-async function toggleRepaired(row: { decay: Decay }): Promise<void> {
-  await decayStore.setRepaired(row.decay.id, !row.decay.repaired)
-  ElMessage.success(row.decay.repaired ? '已标记为未修复' : '已标记为已修复')
-}
-
-async function bulkMarkRepaired(repaired: boolean): Promise<void> {
-  const ids = Array.from(decayStore.selectedIds)
-  if (ids.length === 0) {
-    ElMessage.warning('请先勾选需要处理的病害记录')
-    return
-  }
-  for (const id of ids) {
-    await decayStore.setRepaired(id, repaired)
-  }
-  ElMessage.success(`已批量标记 ${ids.length} 条为${repaired ? '已修复' : '未修复'}`)
-}
-
 function goRepair(row: { decay: Decay }): void {
   repairStore.setActiveDecay(row.decay.id)
   void router.push('/repair')
@@ -220,6 +225,7 @@ function rowKey(row: { decay: Decay }): string {
 const typeOptionsForEdit = DECAY_TYPES
 const severityOptionsForEdit = SEVERITIES
 const severityPalette = SEVERITY_COLOR
+const phaseOptions = REPAIR_PHASES
 </script>
 
 <template>
@@ -261,6 +267,7 @@ const severityPalette = SEVERITY_COLOR
         :percent="decayStore.rows.length ? Math.round((severityCounts.轻度 / decayStore.rows.length) * 100) : 0"
       />
       <StatBadge label="未修复" :value="decayStore.unrepairedCount" suffix="条" icon="Histogram" tone="info" />
+      <StatBadge label="修复中" :value="repairingCount" suffix="条" icon="Loading" tone="warning" />
       <StatBadge
         label="修复完成率"
         :value="decayStore.repairedPercent"
@@ -281,7 +288,7 @@ const severityPalette = SEVERITY_COLOR
       :switch-value="filter.onlyUnrepaired"      keyword-placeholder="按类型 / 颜料 / 成因 / 构件 搜索"
       @change="handleFilterChange"
       @update:switch-value="handleSwitch"
-      @reset="reset"
+      @reset="handleReset"
     >
       <template #actions>
         <el-tag v-if="selectedRows.length > 0" type="primary" effect="plain" round>
@@ -289,6 +296,15 @@ const severityPalette = SEVERITY_COLOR
         </el-tag>
       </template>
     </FilterBar>
+
+    <div class="section-card phase-bar">
+      <span class="phase-bar__label">修复状态</span>
+      <el-radio-group v-model="phaseFilter" size="small">
+        <el-radio-button value="">全部</el-radio-button>
+        <el-radio-button v-for="item in phaseOptions" :key="item" :value="item">{{ item }}</el-radio-button>
+      </el-radio-group>
+      <span class="muted">待安排 = 尚未排工序；修复中 = 工序未全部完成；已修复 = 最后一道工序已完成</span>
+    </div>
 
     <div class="section-card batch-bar">
       <span class="batch-bar__label">批量改严重程度</span>
@@ -302,9 +318,6 @@ const severityPalette = SEVERITY_COLOR
         <el-option v-for="item in typeOptionsForEdit" :key="item" :label="item" :value="item" />
       </el-select>
       <el-button type="primary" plain size="small" @click="applyBatchType">应用</el-button>
-
-      <el-button size="small" @click="bulkMarkRepaired(true)">标记已修复</el-button>
-      <el-button size="small" @click="bulkMarkRepaired(false)">标记未修复</el-button>
     </div>
 
     <div class="section-card">
@@ -314,9 +327,9 @@ const severityPalette = SEVERITY_COLOR
       </div>
 
       <el-table
-        v-if="sortedRows.length > 0"
+        v-if="displayRows.length > 0"
         ref="tableRef"
-        :data="sortedRows"
+        :data="displayRows"
         :row-key="rowKey"
         @selection-change="handleSelectionChange"
       >
@@ -343,8 +356,8 @@ const severityPalette = SEVERITY_COLOR
         <el-table-column label="成因初判" prop="decay.causeGuess" min-width="200" show-overflow-tooltip />
         <el-table-column label="修复" width="150">
           <template #default="{ row }">
-            <el-tag size="small" :type="row.decay.repaired ? 'success' : 'info'" effect="plain">
-              {{ row.decay.repaired ? '已修复' : '未修复' }}
+            <el-tag size="small" :type="phaseTagType(repairStore.phaseOf(row.decay.id))" effect="plain">
+              {{ repairStore.phaseOf(row.decay.id) }}
             </el-tag>
             <span class="mono muted repair-progress">
               {{ repairProgress(row.decay.id).done }}/{{ repairProgress(row.decay.id).total }}
@@ -356,9 +369,6 @@ const severityPalette = SEVERITY_COLOR
             <el-button size="small" text :icon="Edit" @click="openEdit(row)">编辑</el-button>
             <el-button size="small" text :icon="Tools" @click="goRepair(row)">排工序</el-button>
             <el-button size="small" text type="primary" @click="goElements(row)">看层位</el-button>
-            <el-button size="small" text @click="toggleRepaired(row)">
-              {{ row.decay.repaired ? '撤销修复' : '标记修复' }}
-            </el-button>
             <el-button size="small" text type="danger" :icon="Delete" @click="removeRow(row)">删除</el-button>
           </template>
         </el-table-column>
@@ -366,19 +376,19 @@ const severityPalette = SEVERITY_COLOR
 
       <EmptyPanel
         v-else
-        :title="hasFilter ? '没有符合筛选条件的病害' : '尚未记录病害'"
+        :title="hasFilter || phaseFilter ? '没有符合筛选条件的病害' : '尚未记录病害'"
         :description="
-          hasFilter
+          hasFilter || phaseFilter
             ? '可放宽筛选条件，或在构件与层位页为具体层位挂接病害记录。'
             : '先在殿宇总览建立殿宇、在构件与层位页圈定彩画层位，再为本页挂接病害记录。'
         "
-        :action-text="hasFilter ? '' : '前往殿宇总览'"
-        :secondary-text="hasFilter ? '重置筛选条件' : ''"
+        :action-text="hasFilter || phaseFilter ? '' : '前往殿宇总览'"
+        :secondary-text="hasFilter || phaseFilter ? '重置筛选条件' : ''"
         @action="router.push('/halls')"
-        @secondary="reset"
+        @secondary="handleReset"
       >
         <template #actions>
-          <el-button v-if="hasFilter" size="small" @click="reset">重置筛选</el-button>
+          <el-button v-if="hasFilter || phaseFilter" size="small" @click="handleReset">重置筛选</el-button>
         </template>
       </EmptyPanel>
     </div>
@@ -413,6 +423,19 @@ const severityPalette = SEVERITY_COLOR
 </template>
 
 <style scoped>
+.phase-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.phase-bar__label {
+  font-size: 13px;
+  color: #6b6257;
+}
+
 .batch-bar {
   display: flex;
   flex-wrap: wrap;

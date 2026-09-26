@@ -8,7 +8,7 @@ import type { Decay } from '@/types/decay'
 import type { Element } from '@/types/element'
 import type { Hall } from '@/types/hall'
 import type { PaintLayer } from '@/types/layer'
-import type { RepairGroup, RepairState, RepairStep, RepairStepName } from '@/types/repair'
+import type { RepairGroup, RepairPhase, RepairState, RepairStep, RepairStepName } from '@/types/repair'
 
 /**
  * 工序 store：维护工序顺序与完成态，并负责把完成结果回写病害。
@@ -85,6 +85,33 @@ export const useRepairStore = defineStore('repair', () => {
     decayStore.decays.filter((decay) => !steps.value.some((step) => step.decayId === decay.id))
   )
 
+  /** 病害 id → 修复阶段：无工序=待安排，工序未全部完成=修复中，全部完成=已修复 */
+  const phaseMap = computed<Map<string, RepairPhase>>(() => {
+    const grouped = new Map<string, { total: number; done: number }>()
+    steps.value.forEach((step) => {
+      const bucket = grouped.get(step.decayId) ?? { total: 0, done: 0 }
+      bucket.total += 1
+      if (step.state === '已完成') bucket.done += 1
+      grouped.set(step.decayId, bucket)
+    })
+    const map = new Map<string, RepairPhase>()
+    grouped.forEach((bucket, decayId) => {
+      map.set(decayId, bucket.total > 0 && bucket.done === bucket.total ? '已修复' : '修复中')
+    })
+    return map
+  })
+
+  function phaseOf(decayId: string): RepairPhase {
+    return phaseMap.value.get(decayId) ?? '待安排'
+  }
+
+  /** 现场规矩：前一道没做完，后面就点不动 */
+  function isLocked(step: RepairStep): boolean {
+    return steps.value.some(
+      (item) => item.decayId === step.decayId && item.seq < step.seq && item.state !== '已完成'
+    )
+  }
+
   function groupOf(decayId: string): RepairGroup | undefined {
     return groups.value.find((group) => group.decayId === decayId)
   }
@@ -112,9 +139,9 @@ export const useRepairStore = defineStore('repair', () => {
     name: RepairStepName
     material: string
     operator: string
-    state?: RepairState
     seq?: number
   }): Promise<RepairStep> {
+    // 新工序一律从「未开始」起排，推进只能按顺序逐道点
     const step = await repairTable.create(
       {
         decayId: payload.decayId,
@@ -122,7 +149,8 @@ export const useRepairStore = defineStore('repair', () => {
         name: payload.name,
         material: payload.material,
         operator: payload.operator,
-        state: payload.state ?? '未开始'
+        state: '未开始',
+        completedAt: null
       },
       'step'
     )
@@ -169,17 +197,40 @@ export const useRepairStore = defineStore('repair', () => {
     })
   }
 
-  async function setStepState(id: string, state: RepairState): Promise<void> {
+  /**
+   * 推进 / 退回工序状态。
+   * 推进（进行中 / 已完成）时前一道必须已完成；退回时排在其后的工序一并重置为未开始。
+   * 返回被连带重置的后续工序数量。
+   */
+  async function setStepState(id: string, state: RepairState): Promise<number> {
     const step = steps.value.find((item) => item.id === id)
-    if (!step) return
-    await repairTable.update(id, { state })
+    if (!step || step.state === state) return 0
+    if (state !== '未开始' && isLocked(step)) {
+      throw new Error('前一道工序尚未完成，按现场规矩这道点不动')
+    }
+    const now = Date.now()
+    await repairTable.update(id, { state, completedAt: state === '已完成' ? now : null })
+    let cascaded = 0
+    if (state !== '已完成') {
+      const later = steps.value.filter(
+        (item) => item.decayId === step.decayId && item.seq > step.seq && item.state !== '未开始'
+      )
+      for (const item of later) {
+        await repairTable.update(item.id, { state: '未开始', completedAt: null })
+      }
+      cascaded = later.length
+    }
     await syncDecayState(step.decayId)
+    return cascaded
   }
 
-  /** 完成即回写病害为已修复：同病害全部工序完成后置 repaired = true */
+  /** 完成即回写病害为已修复：同病害全部工序完成后置 repaired = true；工序清空则回到待安排 */
   async function syncDecayState(decayId: string): Promise<void> {
     const list = await db.repairSteps.where('decayId').equals(decayId).toArray()
-    if (list.length === 0) return
+    if (list.length === 0) {
+      await decayStore.setRepaired(decayId, false)
+      return
+    }
     const allDone = list.every((step) => step.state === '已完成')
     await decayStore.setRepaired(decayId, allDone)
   }
@@ -214,6 +265,7 @@ export const useRepairStore = defineStore('repair', () => {
           material: '',
           operator: '',
           state: '未开始',
+          completedAt: null,
           createdAt: now,
           updatedAt: now
         })
@@ -240,6 +292,9 @@ export const useRepairStore = defineStore('repair', () => {
     runningSteps,
     overallPercent,
     pendingDecays,
+    phaseMap,
+    phaseOf,
+    isLocked,
     groupOf,
     decayById,
     hallOfGroup,
