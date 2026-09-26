@@ -61,18 +61,22 @@ const filterSelects = computed(() => [
 const cards = computed(() =>
   hallStore.filteredHalls.map((hall) => {
     const stat = hallStore.statMap[hall.id]
-    const aggregate = decayStore.hallAggregate[hall.id]
     const risk = decayStore.hallRisk[hall.id] ?? 0
+    const hallDecays = decayStore.rows.filter((row) => row.hallId === hall.id)
     const steps = repairStore.steps.filter((step) => {
       const decay = decayStore.rows.find((row) => row.decay.id === step.decayId)
       return decay?.hallId === hall.id
     })
     const doneSteps = steps.filter((step) => step.state === '已完成').length
+    const repairingCount = hallDecays.filter((row) => repairStore.stageOf(row.decay.id) === '修复中').length
+    const pendingCount = hallDecays.filter((row) => repairStore.stageOf(row.decay.id) === '待安排').length
     return {
       hall,
       stat,
-      areaText: formatArea(aggregate?.areaCm2 ?? 0),
+      areaText: formatArea(hallDecays.reduce((sum, row) => sum + row.decay.areaCm2, 0)),
       unrepaired: stat?.unrepairedCount ?? 0,
+      repairingCount,
+      pendingCount,
       decayCount: stat?.decayCount ?? 0,
       elementCount: stat?.elementCount ?? 0,
       layerCount: stat?.layerCount ?? 0,
@@ -210,13 +214,20 @@ async function seed(): Promise<void> {
             <h3>{{ card.hall.name }}</h3>
             <p class="muted">{{ card.hall.era }} · {{ card.hall.structureType }} · {{ card.hall.roofType }}顶</p>
           </div>
-          <el-tag :type="card.unrepaired > 0 ? 'danger' : 'success'" effect="plain" round>
-            {{ card.unrepaired > 0 ? `未修复 ${card.unrepaired}` : '病害已清' }}
-          </el-tag>
+          <div class="hall-card__stages">
+            <el-tag v-if="card.repairingCount > 0" type="warning" effect="plain" round>
+              修复中 {{ card.repairingCount }}
+            </el-tag>
+            <el-tag :type="card.unrepaired > 0 ? 'danger' : 'success'" effect="plain" round>
+              {{ card.unrepaired > 0 ? `未修复 ${card.unrepaired}` : '病害已清' }}
+            </el-tag>
+          </div>
         </header>
 
         <div class="hall-card__badges">
           <StatBadge label="病害总数" :value="card.decayCount" suffix="条" size="small" tone="warning" icon="Histogram" />
+          <StatBadge label="待安排" :value="card.pendingCount" suffix="条" size="small" tone="info" icon="Files" />
+          <StatBadge label="修复中" :value="card.repairingCount" suffix="条" size="small" tone="warning" icon="Loading" />
           <StatBadge label="未修复" :value="card.unrepaired" suffix="条" size="small" tone="danger" icon="WarningFilled" />
           <StatBadge
             label="构件 / 层位"
@@ -332,6 +343,12 @@ async function seed(): Promise<void> {
 .hall-card__head p {
   margin: 2px 0 0;
   font-size: 12px;
+}
+
+.hall-card__stages {
+  display: flex;
+  flex-shrink: 0;
+  gap: 6px;
 }
 
 .hall-card__badges {

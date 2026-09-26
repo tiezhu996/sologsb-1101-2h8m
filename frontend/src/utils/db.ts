@@ -5,8 +5,76 @@ import type { PaintLayer } from '@/types/layer'
 import type { Decay } from '@/types/decay'
 import type { RepairStep } from '@/types/repair'
 
+/**
+ * 统一校正工序链与病害修复态（v3 升级、备份导入后均调用）。
+ *
+ * 现场规矩：工序必须按序推进，「已完成」只能是从第一道起的连续前缀；
+ * 凡是前序未完成而自己已完成的跳序数据，一律退回「未开始」并清掉完成时间。
+ * 病害修复态完全由工序回算：没有工序或工序未全部完成 → 未修复；
+ * 全部完成 → 已修复（补上完成时间）。
+ */
+export async function reconcileRepairChains(tables: {
+  repairSteps: Pick<Table<RepairStep, string>, 'toArray' | 'bulkPut'>
+  decays: Pick<Table<Decay, string>, 'toArray' | 'bulkPut'>
+}): Promise<void> {
+  const now = Date.now()
+  const [allSteps, allDecays] = await Promise.all([tables.repairSteps.toArray(), tables.decays.toArray()])
+
+  const grouped = new Map<string, RepairStep[]>()
+  allSteps.forEach((step) => {
+    const list = grouped.get(step.decayId) ?? []
+    list.push(step)
+    grouped.set(step.decayId, list)
+  })
+
+  const changedSteps: RepairStep[] = []
+  const repairedDecayIds = new Set<string>()
+  grouped.forEach((list, decayId) => {
+    const sorted = [...list].sort((a, b) => a.seq - b.seq)
+    // 第一道非「已完成」工序的位置；它之后不允许再出现「已完成」
+    let firstOpen = -1
+    for (let i = 0; i < sorted.length; i += 1) {
+      if (sorted[i].state !== '已完成') {
+        firstOpen = i
+        break
+      }
+    }
+    sorted.forEach((step, index) => {
+      const outOfOrder = firstOpen >= 0 && index > firstOpen && step.state === '已完成'
+      let state = step.state
+      if (outOfOrder || (step.state !== '未开始' && step.state !== '进行中' && step.state !== '已完成')) {
+        state = '未开始'
+      }
+      let completedAt: number | null = step.completedAt ?? null
+      if (state === '已完成') {
+        if (!completedAt) completedAt = step.updatedAt ?? now
+      } else if (completedAt !== null) {
+        completedAt = null
+      }
+      if (state !== step.state || completedAt !== (step.completedAt ?? null)) {
+        changedSteps.push({ ...step, state, completedAt })
+      }
+    })
+    if (firstOpen === -1 && sorted.length > 0) repairedDecayIds.add(decayId)
+  })
+
+  const changedDecays: Decay[] = allDecays
+    .filter((decay) => {
+      const repaired = repairedDecayIds.has(decay.id)
+      return repaired !== decay.repaired || (repaired && !decay.repairedAt)
+    })
+    .map((decay) =>
+      repairedDecayIds.has(decay.id)
+        ? { ...decay, repaired: true, repairedAt: decay.repairedAt ?? now, updatedAt: now }
+        : { ...decay, repaired: false, repairedAt: null, updatedAt: now }
+    )
+
+  if (changedSteps.length > 0) await tables.repairSteps.bulkPut(changedSteps)
+  if (changedDecays.length > 0) await tables.decays.bulkPut(changedDecays)
+}
+
 /** 本地结构版本号：新增/修改表结构时必须递增，并补充 upgrade 迁移 */
-export const DB_VERSION = 2
+export const DB_VERSION = 3
 
 /** 本地存储键名（localStorage 侧的少量元数据） */
 export const LS_KEYS = {
@@ -54,7 +122,7 @@ export class MuralArchDatabase extends Dexie {
       repairSteps: 'id, decayId, seq, state, updatedAt'
     })
     // v2：病害表补充 repairedAt 索引，工序表补充 name 索引
-    this.version(DB_VERSION)
+    this.version(2)
       .stores({
         halls: 'id, name, era, structureType, roofType, updatedAt',
         elements: 'id, hallId, position, status, updatedAt',
@@ -75,6 +143,22 @@ export class MuralArchDatabase extends Dexie {
               decay.repaired = false
             }
           })
+      })
+    // v3：工序表补充 completedAt 索引；工序改为严格按序推进，
+    // 升级时统一校正历史「跳序完成 / 手工标记」造成的不合规数据。
+    this.version(DB_VERSION)
+      .stores({
+        halls: 'id, name, era, structureType, roofType, updatedAt',
+        elements: 'id, hallId, position, status, updatedAt',
+        layers: 'id, elementId, level, patternName, pigment',
+        decays: 'id, layerId, type, severity, repaired, repairedAt, updatedAt',
+        repairSteps: 'id, decayId, seq, name, state, completedAt, updatedAt'
+      })
+      .upgrade(async (tx) => {
+        await reconcileRepairChains({
+          repairSteps: tx.table<RepairStep>('repairSteps'),
+          decays: tx.table<Decay>('decays')
+        })
       })
   }
 }

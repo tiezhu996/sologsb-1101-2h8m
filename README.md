@@ -67,10 +67,10 @@ npm run preview    # 本地预览构建产物（http://localhost:21801）
 
 | 路由 | 页面 | 主要职责 | 消费模型 |
 | --- | --- | --- | --- |
-| `/halls` | 殿宇总览 | 新建殿宇、按年代与结构类型筛选，卡片回显病害总数与未修复数 | Hall、Element、PaintLayer、Decay |
+| `/halls` | 殿宇总览 | 新建殿宇、按年代与结构类型筛选，卡片回显病害总数、待安排 / 修复中 / 未修复条数 | Hall、Element、PaintLayer、Decay |
 | `/halls/:id/elements` | 构件与层位 | 构件树 + 层位表格，新增构件与层位，挂接病害 | Element、PaintLayer、Decay |
-| `/decays` | 病害档案台 | 按类型 / 程度 / 颜料 / 殿宇 / 部位组合筛选，批量改严重程度与类型 | Decay、PaintLayer |
-| `/repair` | 修复工序时间线 | 拖拽调整工序先后，回填材料与责任人，完成即回写病害为已修复 | RepairStep、Decay |
+| `/decays` | 病害档案台 | 按类型 / 程度 / 颜料 / 殿宇 / 部位 / 修复阶段组合筛选，批量改严重程度与类型 | Decay、PaintLayer |
+| `/repair` | 修复工序时间线 | 拖拽调整工序先后，回填材料与责任人；工序严格按序推进，最后一道完成才回写病害为已修复，并记录完成时间 | RepairStep、Decay |
 | `/backup` | 本地数据与备份 | 查看本地结构版本、JSON 导入导出、清空与样例数据 | 全部模型 |
 
 `/` 与未匹配路径均重定向到 `/halls`。
@@ -84,10 +84,12 @@ npm run preview    # 本地预览构建产物（http://localhost:21801）
 | Hall 殿宇 | `src/types/hall.ts` | `id` `name` `era` `structureType`（大木/小式） `roofType`（庑殿/歇山/悬山） | 新建后进入构件录入 |
 | Element 构件 | `src/types/element.ts` | `id` `hallId` `position`（檐下/室内/梁枋/斗拱/天花） `name` `layerCount` `baseLayer` `status`（完好/观察/待修） | 按殿宇与部位二维筛选 |
 | PaintLayer 彩画层位 | `src/types/layer.ts` | `id` `elementId` `level`（由外至内） `patternName`（旋子/和玺/苏式） `pigment`（石青/石绿/朱砂/土黄） `thicknessMm` | 层位顺次叠压 |
-| Decay 病害记录 | `src/types/decay.ts` | `id` `layerId` `type`（起甲/剥落/空鼓/粉化/龟裂） `severity`（轻度/中度/重度） `areaCm2` `causeGuess` `repaired` | 同层位可叠加多条并汇总到殿宇 |
-| RepairStep 修复工序 | `src/types/repair.ts` | `id` `decayId` `seq` `name`（除尘/回贴/灌浆/补绘/封护） `material` `operator` `state`（未开始/进行中/已完成） | 拖拽排序，完成回写病害 |
+| Decay 病害记录 | `src/types/decay.ts` | `id` `layerId` `type`（起甲/剥落/空鼓/粉化/龟裂） `severity`（轻度/中度/重度） `areaCm2` `causeGuess` `repaired` | 同层位可叠加多条并汇总到殿宇；修复阶段（待安排/修复中/已修复）由工序现场派生 |
+| RepairStep 修复工序 | `src/types/repair.ts` | `id` `decayId` `seq` `name`（除尘/回贴/灌浆/补绘/封护） `material` `operator` `state`（未开始/进行中/已完成） `completedAt` | 拖拽排序，必须按序推进，最后一道完成才回写病害 |
 
-数据结构版本号 `DB_VERSION` 定义在 `src/utils/db.ts`，当前为 `v2`：`decays` 表补充 `repairedAt` 索引，并为修复状态缺失的历史数据按 `updatedAt` 回填，升级逻辑写在 Dexie 的 `.upgrade()` 中。
+**修复现场规矩**：工序卡片只有「未开始 / 进行中 / 已完成」三个按钮，前一道没做完时后面工序的「进行中 / 已完成」点不动；已完成工序可退回，其后的已完成工序一并退回「未开始」并清掉完成时间。点为已完成时记下 `completedAt`，退回时清空；某病害工序全部完成（最后一道已完成）才把病害回写为「已修复」，退回任意一道则病害回到「修复中」；工序被清空的病害回到「待安排」。病害修复阶段完全由工序派生：无工序为「待安排」、工序未完为「修复中」、全部完成为「已修复」。
+
+数据结构版本号 `DB_VERSION` 定义在 `src/utils/db.ts`，当前为 `v3`：`repairSteps` 表补充 `completedAt` 索引；v3 升级时按现场规矩统一校正历史「跳序完成 / 手工标记」数据（已完成必须是从第一道起的连续前缀，病害修复态由工序整体回算）。v2 曾为 `decays` 表补充 `repairedAt` 索引，升级逻辑写在 Dexie 的 `.upgrade()` 中。
 
 ---
 

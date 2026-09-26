@@ -59,7 +59,7 @@ const storageRows = computed(() => [
     key: 'id, layerId, type, severity, repaired, repairedAt, updatedAt',
     count: counts.value.decays
   },
-  { table: 'repairSteps（工序）', key: 'id, decayId, seq, name, state, updatedAt', count: counts.value.repairSteps }
+  { table: 'repairSteps（工序）', key: 'id, decayId, seq, name, state, completedAt, updatedAt', count: counts.value.repairSteps }
 ])
 
 const localStorageRows = computed(() => [
@@ -214,7 +214,8 @@ const previewKeys: Array<{ key: keyof Pick<BackupPayload, 'halls' | 'elements' |
         </el-table-column>
       </el-table>
       <p class="muted storage-note">
-        版本 1 → 2 的迁移：decays 表补充 repairedAt 索引，修复状态字段缺失的历史数据按 updatedAt 回填。
+        版本 1 → 2：decays 表补充 repairedAt 索引，缺失修复时间的历史数据按 updatedAt 回填；版本 2 →
+        3：repairSteps 表补充 completedAt 索引，工序改为严格按序推进，并统一校正跳序完成 / 手工标记的历史数据。
       </p>
     </div>
 

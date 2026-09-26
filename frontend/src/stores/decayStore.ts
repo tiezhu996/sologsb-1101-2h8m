@@ -73,7 +73,6 @@ export const useDecayStore = defineStore('decay', () => {
       if (filter.value.types.length > 0 && !filter.value.types.includes(decay.type)) return false
       if (filter.value.severities.length > 0 && !filter.value.severities.includes(decay.severity)) return false
       if (filter.value.pigments.length > 0 && (!layer || !filter.value.pigments.includes(layer.pigment))) return false
-      if (filter.value.onlyUnrepaired && decay.repaired) return false
       return true
     })
   )
@@ -145,7 +144,7 @@ export const useDecayStore = defineStore('decay', () => {
       filter.value.types.length > 0 ||
       filter.value.severities.length > 0 ||
       filter.value.pigments.length > 0 ||
-      filter.value.onlyUnrepaired
+      filter.value.stage !== ''
   )
 
   function patchFilter(patch: Partial<DecayFilterState>): void {

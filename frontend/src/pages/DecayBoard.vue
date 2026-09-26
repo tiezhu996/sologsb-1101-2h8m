@@ -11,7 +11,7 @@ import { useDecayFilter } from '@/hooks/useDecayFilter'
 import { useHallStore } from '@/stores/hallStore'
 import { useDecayStore } from '@/stores/decayStore'
 import { useRepairStore } from '@/stores/repairStore'
-import { DECAY_TYPES, type Decay, type DecayType, type Severity } from '@/types/decay'
+import { DECAY_TYPES, REPAIR_STAGES, type Decay, type DecayType, type RepairStage, type Severity } from '@/types/decay'
 import { SEVERITIES } from '@/types/decay'
 import { formatArea, SEVERITY_COLOR } from '@/utils/severity'
 
@@ -91,8 +91,18 @@ function handleFilterChange(value: FilterModel): void {
   })
 }
 
-function handleSwitch(value: boolean): void {
-  patch({ onlyUnrepaired: value })
+function handleStageChange(value: RepairStage | ''): void {
+  patch({ stage: value })
+}
+
+function stageOf(decayId: string): RepairStage {
+  return repairStore.stageOf(decayId)
+}
+
+function stageTagType(stage: RepairStage): 'success' | 'warning' | 'info' {
+  if (stage === '已修复') return 'success'
+  if (stage === '修复中') return 'warning'
+  return 'info'
 }
 
 function handleSelectionChange(rows: Array<{ decay: Decay }>): void {
@@ -180,23 +190,6 @@ async function removeRow(row: { decay: Decay }): Promise<void> {
   ElMessage.success('病害记录已删除')
 }
 
-async function toggleRepaired(row: { decay: Decay }): Promise<void> {
-  await decayStore.setRepaired(row.decay.id, !row.decay.repaired)
-  ElMessage.success(row.decay.repaired ? '已标记为未修复' : '已标记为已修复')
-}
-
-async function bulkMarkRepaired(repaired: boolean): Promise<void> {
-  const ids = Array.from(decayStore.selectedIds)
-  if (ids.length === 0) {
-    ElMessage.warning('请先勾选需要处理的病害记录')
-    return
-  }
-  for (const id of ids) {
-    await decayStore.setRepaired(id, repaired)
-  }
-  ElMessage.success(`已批量标记 ${ids.length} 条为${repaired ? '已修复' : '未修复'}`)
-}
-
 function goRepair(row: { decay: Decay }): void {
   repairStore.setActiveDecay(row.decay.id)
   void router.push('/repair')
@@ -219,6 +212,7 @@ function rowKey(row: { decay: Decay }): string {
 
 const typeOptionsForEdit = DECAY_TYPES
 const severityOptionsForEdit = SEVERITIES
+const stageOptions = REPAIR_STAGES
 const severityPalette = SEVERITY_COLOR
 </script>
 
@@ -260,7 +254,27 @@ const severityPalette = SEVERITY_COLOR
         tone="success"
         :percent="decayStore.rows.length ? Math.round((severityCounts.轻度 / decayStore.rows.length) * 100) : 0"
       />
-      <StatBadge label="未修复" :value="decayStore.unrepairedCount" suffix="条" icon="Histogram" tone="info" />
+      <StatBadge
+        label="待安排"
+        :value="repairStore.stageCounts.pending"
+        suffix="条"
+        icon="Files"
+        tone="info"
+      />
+      <StatBadge
+        label="修复中"
+        :value="repairStore.stageCounts.repairing"
+        suffix="条"
+        icon="Loading"
+        tone="warning"
+      />
+      <StatBadge
+        label="已修复"
+        :value="repairStore.stageCounts.repaired"
+        suffix="条"
+        icon="SuccessFilled"
+        tone="success"
+      />
       <StatBadge
         label="修复完成率"
         :value="decayStore.repairedPercent"
@@ -276,13 +290,21 @@ const severityPalette = SEVERITY_COLOR
     <FilterBar
       :model-value="filterModel"
       :selects="filterSelects"
-      has-switch
-      switch-label="仅未修复"
-      :switch-value="filter.onlyUnrepaired"      keyword-placeholder="按类型 / 颜料 / 成因 / 构件 搜索"
+      keyword-placeholder="按类型 / 颜料 / 成因 / 构件 搜索"
       @change="handleFilterChange"
-      @update:switch-value="handleSwitch"
       @reset="reset"
     >
+      <template #extra>
+        <span class="stage-filter__label">修复阶段</span>
+        <el-radio-group
+          :model-value="filter.stage"
+          size="small"
+          @update:model-value="(value: RepairStage | '') => handleStageChange(value)"
+        >
+          <el-radio-button value="">全部</el-radio-button>
+          <el-radio-button v-for="stage in stageOptions" :key="stage" :value="stage">{{ stage }}</el-radio-button>
+        </el-radio-group>
+      </template>
       <template #actions>
         <el-tag v-if="selectedRows.length > 0" type="primary" effect="plain" round>
           已选 {{ selectedRows.length }} 条
@@ -302,9 +324,6 @@ const severityPalette = SEVERITY_COLOR
         <el-option v-for="item in typeOptionsForEdit" :key="item" :label="item" :value="item" />
       </el-select>
       <el-button type="primary" plain size="small" @click="applyBatchType">应用</el-button>
-
-      <el-button size="small" @click="bulkMarkRepaired(true)">标记已修复</el-button>
-      <el-button size="small" @click="bulkMarkRepaired(false)">标记未修复</el-button>
     </div>
 
     <div class="section-card">
@@ -341,24 +360,21 @@ const severityPalette = SEVERITY_COLOR
           <template #default="{ row }">{{ layerLabel(row.decay.layerId) }}</template>
         </el-table-column>
         <el-table-column label="成因初判" prop="decay.causeGuess" min-width="200" show-overflow-tooltip />
-        <el-table-column label="修复" width="150">
+        <el-table-column label="修复阶段" width="160">
           <template #default="{ row }">
-            <el-tag size="small" :type="row.decay.repaired ? 'success' : 'info'" effect="plain">
-              {{ row.decay.repaired ? '已修复' : '未修复' }}
+            <el-tag size="small" :type="stageTagType(stageOf(row.decay.id))" effect="plain">
+              {{ stageOf(row.decay.id) }}
             </el-tag>
             <span class="mono muted repair-progress">
               {{ repairProgress(row.decay.id).done }}/{{ repairProgress(row.decay.id).total }}
             </span>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="260" fixed="right">
+        <el-table-column label="操作" width="220" fixed="right">
           <template #default="{ row }">
             <el-button size="small" text :icon="Edit" @click="openEdit(row)">编辑</el-button>
             <el-button size="small" text :icon="Tools" @click="goRepair(row)">排工序</el-button>
             <el-button size="small" text type="primary" @click="goElements(row)">看层位</el-button>
-            <el-button size="small" text @click="toggleRepaired(row)">
-              {{ row.decay.repaired ? '撤销修复' : '标记修复' }}
-            </el-button>
             <el-button size="small" text type="danger" :icon="Delete" @click="removeRow(row)">删除</el-button>
           </template>
         </el-table-column>
@@ -428,6 +444,12 @@ const severityPalette = SEVERITY_COLOR
 
 .batch-bar__select {
   width: 140px;
+}
+
+.stage-filter__label {
+  font-size: 13px;
+  color: #6b6257;
+  margin-right: 4px;
 }
 
 .full-width {

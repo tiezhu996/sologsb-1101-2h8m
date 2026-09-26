@@ -9,14 +9,16 @@ import SeverityTag from '@/components/common/SeverityTag.vue'
 import StatBadge from '@/components/common/StatBadge.vue'
 import { useHallStore } from '@/stores/hallStore'
 import { useDecayStore } from '@/stores/decayStore'
+import { useRepairStore } from '@/stores/repairStore'
 import { ELEMENT_POSITIONS, ELEMENT_STATUSES, type Element, type ElementPosition, type ElementStatus } from '@/types/element'
 import { PATTERN_NAMES, PIGMENTS, type PaintLayer, type PatternName, type Pigment } from '@/types/layer'
-import { DECAY_TYPES, SEVERITIES, type Decay, type DecayType, type Severity } from '@/types/decay'
+import { DECAY_TYPES, SEVERITIES, type Decay, type DecayType, type RepairStage, type Severity } from '@/types/decay'
 
 const route = useRoute()
 const router = useRouter()
 const hallStore = useHallStore()
 const decayStore = useDecayStore()
+const repairStore = useRepairStore()
 
 const hallId = computed(() => String(route.params.id ?? ''))
 const hall = computed(() => hallStore.hallById(hallId.value) ?? null)
@@ -177,6 +179,16 @@ const selectedStats = computed(() => {
 
 function layerDecays(layerId: string): Decay[] {
   return hallStore.decaysOfLayer(layerId)
+}
+
+function decayStage(decayId: string): RepairStage {
+  return repairStore.stageOf(decayId)
+}
+
+function decayStageTagType(stage: RepairStage): 'success' | 'warning' | 'info' {
+  if (stage === '已修复') return 'success'
+  if (stage === '修复中') return 'warning'
+  return 'info'
 }
 
 function layerSeverity(layerId: string): Severity | null {
@@ -540,10 +552,10 @@ const severityOptions = SEVERITIES
                           </template>
                         </el-table-column>
                         <el-table-column label="成因初判" prop="causeGuess" min-width="200" />
-                        <el-table-column label="修复状态" width="100">
+                        <el-table-column label="修复阶段" width="100">
                           <template #default="{ row: decay }">
-                            <el-tag size="small" :type="decay.repaired ? 'success' : 'info'" effect="plain">
-                              {{ decay.repaired ? '已修复' : '未修复' }}
+                            <el-tag size="small" :type="decayStageTagType(decayStage(decay.id))" effect="plain">
+                              {{ decayStage(decay.id) }}
                             </el-tag>
                           </template>
                         </el-table-column>

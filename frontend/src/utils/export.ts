@@ -3,6 +3,7 @@ import {
   DB_VERSION,
   createId,
   clearAllTables,
+  reconcileRepairChains,
   stampBackupTime,
   type BackupPayload
 } from '@/utils/db'
@@ -111,6 +112,8 @@ export async function importBackup(
       await db.layers.bulkPut(payload.layers)
       await db.decays.bulkPut(payload.decays)
       await db.repairSteps.bulkPut(payload.repairSteps)
+      // 旧版备份可能存在跳序完成 / 手工标记，导入后按现场规矩统一校正
+      await reconcileRepairChains({ repairSteps: db.repairSteps, decays: db.decays })
     }
   )
   return {
@@ -259,6 +262,7 @@ export async function seedDemoData(): Promise<void> {
           material: '软毛刷 + 去离子水',
           operator: '李文博',
           state: '已完成',
+          completedAt: now,
           createdAt: now,
           updatedAt: now
         },
@@ -270,6 +274,7 @@ export async function seedDemoData(): Promise<void> {
           material: '鱼鳔胶（2% 明矾水调和）',
           operator: '李文博',
           state: '进行中',
+          completedAt: null,
           createdAt: now,
           updatedAt: now
         }

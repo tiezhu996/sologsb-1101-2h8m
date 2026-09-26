@@ -11,6 +11,8 @@ export interface RepairStep {
   material: string
   operator: string
   state: RepairState
+  /** 点为「已完成」时的时刻；退回其它状态时清空 */
+  completedAt: number | null
   createdAt: number
   updatedAt: number
 }
@@ -29,4 +31,6 @@ export interface RepairGroup {
   doneCount: number
   totalCount: number
   percent: number
+  /** 该病害当前的修复阶段：待安排 / 修复中 / 已修复 */
+  stage: import('./decay').RepairStage
 }

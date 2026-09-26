@@ -11,6 +11,7 @@ import { useRepairStore } from '@/stores/repairStore'
 import type { RepairGroup } from '@/types/repair'
 import { REPAIR_STATES, REPAIR_STEP_NAMES, type RepairState, type RepairStep, type RepairStepName } from '@/types/repair'
 import { formatArea } from '@/utils/severity'
+import { formatDateTime } from '@/utils/datetime'
 
 const hallStore = useHallStore()
 const decayStore = useDecayStore()
@@ -53,13 +54,11 @@ const stepForm = reactive<{
   name: RepairStepName
   material: string
   operator: string
-  state: RepairState
 }>({
   decayId: '',
   name: '除尘',
   material: '',
-  operator: '',
-  state: '未开始'
+  operator: ''
 })
 
 const scratchDialogVisible = ref(false)
@@ -128,13 +127,11 @@ function openStepDialog(decayId: string, step?: RepairStep): void {
     stepForm.name = step.name
     stepForm.material = step.material
     stepForm.operator = step.operator
-    stepForm.state = step.state
   } else {
     editingStepId.value = null
     stepForm.name = '除尘'
     stepForm.material = ''
     stepForm.operator = ''
-    stepForm.state = '未开始'
   }
   stepDialogVisible.value = true
 }
@@ -145,8 +142,7 @@ async function submitStep(): Promise<void> {
     await repairStore.updateStep(editingStepId.value, {
       name: stepForm.name,
       material: stepForm.material.trim(),
-      operator: stepForm.operator.trim(),
-      state: stepForm.state
+      operator: stepForm.operator.trim()
     })
     ElMessage.success('工序已更新')
   } else {
@@ -154,10 +150,9 @@ async function submitStep(): Promise<void> {
       decayId: stepForm.decayId,
       name: stepForm.name,
       material: stepForm.material.trim(),
-      operator: stepForm.operator.trim(),
-      state: stepForm.state
+      operator: stepForm.operator.trim()
     })
-    ElMessage.success('已追加修复工序')
+    ElMessage.success('已追加修复工序（状态：未开始）')
   }
   stepDialogVisible.value = false
 }
@@ -182,13 +177,32 @@ async function removeGroup(group: RepairGroup): Promise<void> {
   ElMessage.success('该病害的工序已清空')
 }
 
+/** 前一道工序是否已完成；第一道工序默认放行 */
+function prevDone(group: RepairGroup, index: number): boolean {
+  if (index === 0) return true
+  return group.steps[index - 1].state === '已完成'
+}
+
+/**
+ * 现场规矩：前一道没做完，后面的工序「进行中 / 已完成」点不动。
+ * 退回「未开始」始终允许（会级联退回后续已完成工序）。
+ */
+function canChangeState(group: RepairGroup, index: number, state: RepairState): boolean {
+  const step = group.steps[index]
+  if (state === '未开始') return step.state !== '未开始'
+  return state !== step.state && prevDone(group, index)
+}
+
 async function changeState(step: RepairStep, state: RepairState): Promise<void> {
-  await repairStore.setStepState(step.id, state)
-  const group = repairStore.groupOf(step.decayId)
-  if (state === '已完成' && group && group.doneCount === group.totalCount) {
-    ElMessage.success('该病害全部工序完成，病害已回写为「已修复」')
+  const result = await repairStore.changeStepState(step.id, state)
+  if (!result.ok) {
+    ElMessage.warning(result.message)
+    return
+  }
+  if (result.resetCount > 0) {
+    ElMessage.success(`${result.message}，后续 ${result.resetCount} 道工序已一并退回「未开始」`)
   } else {
-    ElMessage.success(`工序状态已改为「${state}」`)
+    ElMessage.success(result.message)
   }
 }
 
@@ -209,8 +223,12 @@ async function onDrop(group: RepairGroup, target: RepairStep): Promise<void> {
   const ordered = group.steps.map((step) => step.id).filter((id) => id !== sourceId)
   const targetIndex = ordered.indexOf(target.id)
   ordered.splice(targetIndex, 0, sourceId)
-  await repairStore.reorder(group.decayId, ordered)
-  ElMessage.success('工序顺序已调整')
+  const resetCount = await repairStore.reorder(group.decayId, ordered)
+  if (resetCount > 0) {
+    ElMessage.warning(`工序顺序已调整，${resetCount} 道跳序完成的工序已退回「未开始」`)
+  } else {
+    ElMessage.success('工序顺序已调整')
+  }
 }
 
 async function openScratch(): Promise<void> {
@@ -362,6 +380,13 @@ const stateOptions = REPAIR_STATES
           </div>
           <div class="timeline__head-right">
             <SeverityTag v-if="group.decay" :severity="group.decay.severity" size="small" plain />
+            <el-tag
+              :type="group.stage === '已修复' ? 'success' : group.stage === '修复中' ? 'warning' : 'info'"
+              effect="plain"
+              round
+            >
+              {{ group.stage }}
+            </el-tag>
             <el-tag :type="group.percent === 100 ? 'success' : 'info'" effect="plain" round>
               {{ group.doneCount }}/{{ group.totalCount }}（{{ group.percent }}%）
             </el-tag>
@@ -402,6 +427,9 @@ const stateOptions = REPAIR_STATES
                 <el-tag size="small" effect="plain" :type="step.state === '已完成' ? 'success' : step.state === '进行中' ? 'warning' : 'info'">
                   {{ step.state }}
                 </el-tag>
+                <span v-if="step.completedAt" class="step-card__time muted">
+                  完成于 {{ formatDateTime(step.completedAt) }}
+                </span>
               </div>
               <div class="step-card__fields">
                 <el-input
@@ -423,14 +451,29 @@ const stateOptions = REPAIR_STATES
               </div>
             </div>
             <div class="step-card__actions">
-              <el-select
+              <el-radio-group
                 :model-value="step.state"
                 size="small"
                 class="step-card__state"
                 @update:model-value="(value: RepairState) => changeState(step, value)"
               >
-                <el-option v-for="item in stateOptions" :key="item" :label="item" :value="item" />
-              </el-select>
+                <el-tooltip
+                  v-for="item in stateOptions"
+                  :key="item"
+                  :disabled="canChangeState(group, index, item)"
+                  content="前一道工序还没做完"
+                  placement="top"
+                >
+                  <span class="step-card__state-item">
+                    <el-radio-button
+                      :value="item"
+                      :disabled="!canChangeState(group, index, item)"
+                    >
+                      {{ item }}
+                    </el-radio-button>
+                  </span>
+                </el-tooltip>
+              </el-radio-group>
               <el-button size="small" text :icon="Edit" @click="openStepDialog(group.decayId, step)">编辑</el-button>
               <el-button size="small" text type="danger" @click="removeStep(step)">删除</el-button>
             </div>
@@ -471,12 +514,8 @@ const stateOptions = REPAIR_STATES
         <el-form-item label="责任人">
           <el-input v-model="stepForm.operator" placeholder="如：李文博" maxlength="20" />
         </el-form-item>
-        <el-form-item label="工序状态">
-          <el-radio-group v-model="stepForm.state">
-            <el-radio v-for="item in stateOptions" :key="item" :value="item">{{ item }}</el-radio>
-          </el-radio-group>
-        </el-form-item>
       </el-form>
+      <p class="muted">新工序默认「未开始」；工序状态请在时间线卡片上按现场顺序逐道推进。</p>
       <template #footer>
         <el-button @click="stepDialogVisible = false">取消</el-button>
         <el-button type="primary" @click="submitStep">保存</el-button>
@@ -667,7 +706,15 @@ const stateOptions = REPAIR_STATES
 }
 
 .step-card__state {
-  width: 110px;
+  flex-shrink: 0;
+}
+
+.step-card__state-item {
+  display: inline-block;
+}
+
+.step-card__time {
+  font-size: 12px;
 }
 
 .timeline__add {
